@@ -1,0 +1,72 @@
+# Fleet Management Backend — Assignment 2 (Peppermint Robotics SDE-1)
+# Brings up: MQTT broker, MongoDB (history store), backend service, robot simulator.
+# One command: docker compose up --build
+#
+# Platforms are pinned to linux/amd64 so the stack boots identically on the
+# x86_64 evaluation machine even if it was built on ARM (Apple Silicon).
+
+services:
+  broker:
+    image: eclipse-mosquitto:2
+    platform: linux/amd64
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./broker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$SYS/#", "-C", "1", "-i", "healthcheck", "-W", "3"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  mongo:
+    image: mongo:7
+    platform: linux/amd64
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      MQTT_URL: "mqtt://broker:1883"
+      MONGO_URI: "mongodb://mongo:27017/fleet"
+      STALE_MS: "15000"          # silence longer than this -> robot flagged stale
+      SWEEP_INTERVAL_MS: "5000"  # watchdog cadence
+    ports:
+      - "8080:8080"
+    depends_on:
+      broker:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+
+  simulator:
+    build:
+      context: .
+      dockerfile: robot-simulator/Dockerfile
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      MQTT_URL: "mqtt://broker:1883"
+      REPLAY_SPEED: "2"   # 2x real time: the 15-minute log replays in ~7.5 min, then loops
+      CHAOS: "0"          # set to "1" to randomly drop robot links (demo of LWT offline detection)
+    depends_on:
+      broker:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+volumes:
+  mongo-data:
