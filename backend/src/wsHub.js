@@ -13,7 +13,7 @@
  *   - slow clients: if a socket's bufferedAmount grows past a threshold we
  *     drop the client rather than let one bad consumer stall the fanout loop.
  */
-const { WebSocketServer } = require('ws');
+const { WebSocketServer, WebSocket } = require('ws');
 
 const PING_INTERVAL_MS = 30000;
 const MAX_BUFFERED_BYTES = 1 << 20; // 1 MiB
@@ -50,7 +50,7 @@ class WsHub {
   }
 
   send(ws, msg) {
-    if (ws.readyState !== ws.OPEN) return;
+    if (ws.readyState !== WebSocket.OPEN) return;
     if (ws.bufferedAmount > MAX_BUFFERED_BYTES) {
       console.warn('[ws] slow client exceeded buffer, terminating');
       ws.terminate();
@@ -63,7 +63,7 @@ class WsHub {
   broadcast(event) {
     const msg = JSON.stringify({ type: 'update', data: event });
     for (const ws of this.wss.clients) {
-      if (ws.readyState !== ws.OPEN) continue;
+      if (ws.readyState !== WebSocket.OPEN) continue;
       if (ws.bufferedAmount > MAX_BUFFERED_BYTES) { ws.terminate(); continue; }
       ws.send(msg);
     }
