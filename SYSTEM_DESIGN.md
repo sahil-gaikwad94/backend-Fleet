@@ -1,11 +1,6 @@
 
 # SYSTEM_DESIGN.md — Fleet Management Backend
 
-Repo: https://github.com/sahil-gaikwad94/backend-Fleet — code referenced below
-is `backend/src/*.js`, `robot-simulator/src/*.js`, `docker-compose.yml`.
-`events.jsonl` in the repo is the full, final dataset used for this
-submission, not a scaled-down sample.
-
 ## 1. Can the design take a new feature without a rewrite?
 
 Let me walk through a real one: alert the operator when a robot's battery
