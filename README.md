@@ -106,8 +106,6 @@ LWT + watchdog for failure detection — and the AI drafted explanatory comments
 data-reconstruction script. Every design decision, and every bug I found
 while integrating it — a blocking Mongo connect on boot, resolving the data
 directory across Docker vs. running locally, an LWT race in the test
-harness, and a log-loop bug where the replay's `t` reset to 0 every lap and
-got silently rejected by my own stale-event guard after ~7.5 minutes — is
-mine, and I can walk through any of it line by line.
+harness is mine, and I can walk through any of it line by line.
 
 
