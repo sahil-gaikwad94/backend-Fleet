@@ -82,8 +82,7 @@ backend actually needs from it.
   QoS 1 redeliveries from rewinding a robot's position for every client at
   once.
 - **MongoDB for history.** The events are basically schemaless JSON with an
-  occasional extra key — a document store fit with no ORM ceremony, and it's
-  the M of MERN.
+  occasional extra key — a document store fit with no ORM ceremony.
 
 ## Tests
 
