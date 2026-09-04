@@ -1,16 +1,15 @@
 # Fleet Management Backend — Peppermint Robotics SDE-1 (Assignment 2)
 
-A backend for a fleet-management dashboard. Eight mocked robots replay their
-recorded telemetry from `events.jsonl` over MQTT; a Node.js backend ingests
-the stream, maintains the fleet's current state in one in-memory store, and
-exposes it over **both** a WebSocket push stream and a REST polling API, kept
-consistent by construction. Fleet history is persisted to MongoDB (stretch
-goal) and everything boots with a single `docker compose up`.
+Backend for a robot-fleet dashboard. Eight mocked robots replay their recorded
+telemetry (`events.jsonl`) over MQTT. A Node backend consumes that stream,
+keeps the fleet's current state in one in-memory store, and serves it two
+ways — a WebSocket push stream and a REST polling API — both reading the same
+store so they can never disagree. Fleet history is persisted to MongoDB
+(stretch goal). Everything comes up with one `docker compose up`.
 
 ## Stack
 
-Node.js 20 + Express + `ws` + MQTT (Mosquitto) + MongoDB + Docker Compose —
-the MERN ecosystem's backend half, with MQTT as the robot-facing transport.
+Node.js 20, Express, `ws`, MQTT (Mosquitto), MongoDB, Docker Compose.
 
 ## Run it
 
@@ -18,73 +17,73 @@ the MERN ecosystem's backend half, with MQTT as the robot-facing transport.
 docker compose up --build
 ```
 
-That one command brings up four services:
+| Service     | What it is                                        | Port  |
+|-------------|----------------------------------------------------|-------|
+| `broker`    | Eclipse Mosquitto MQTT broker                      | 1883  |
+| `mongo`     | MongoDB 7, persists fleet history (stretch goal)   | 27017 |
+| `backend`   | Express REST + WebSocket API, MQTT consumer        | 8080  |
+| `simulator` | Forks one OS process per robot                     |   —   |
 
-| Service     | What it is                                             | Port  |
-|-------------|--------------------------------------------------------|-------|
-| `broker`    | Eclipse Mosquitto MQTT broker                          | 1883  |
-| `mongo`     | MongoDB 7, persists fleet history (stretch goal)       | 27017 |
-| `backend`   | Express REST + WebSocket API, MQTT consumer            | 8080  |
-| `simulator` | Supervisor that forks **one OS process per robot**     |   —   |
-
-The simulator starts the robot fleet by itself; nothing needs to be run by
-hand in a second terminal. All images are pinned `linux/amd64` so the stack
-boots on x86_64 even if built on Apple Silicon.
+Nothing needs to be run by hand in a second terminal — the simulator starts
+all 8 robots on its own. Images are pinned to `linux/amd64` so it boots on
+the eval machine even if built on Apple Silicon.
 
 ### Try it
 
 ```bash
-# REST snapshot (polling client)
-curl http://localhost:8080/api/robots
+curl http://localhost:8080/api/robots                 # fleet snapshot (polling)
+curl http://localhost:8080/api/robots/r1               # one robot + last-20 events
+curl "http://localhost:8080/api/robots/history/r1?from=300&to=500"   # Mongo history (stretch)
+curl http://localhost:8080/api/health                  # liveness + ingestion counters
 
-# one robot, including its last-20 event tail
-curl http://localhost:8080/api/robots/r1
-
-# persisted history (stretch goal), t = event seconds 0..900
-curl "http://localhost:8080/api/robots/history/r1?from=300&to=500&limit=100"
-
-# health / ingestion counters
-curl http://localhost:8080/api/health
-
-# WebSocket stream
+# live stream
 node -e "new (require('ws'))('ws://localhost:8080/ws').on('message', d => console.log(d.toString()))"
 ```
 
 Every WebSocket client gets a full `snapshot` on connect, then an `update`
-message for every ingested event. A reconnecting client can send
-`{"type":"snapshot"}` to re-sync at any time.
+for each ingested event after that. Send `{"type":"snapshot"}` on the socket
+to re-sync at any point.
 
-### Knobs (environment variables)
+### Env vars
 
-| Var                 | Default      | Meaning                                        |
-|---------------------|--------------|------------------------------------------------|
-| `REPLAY_SPEED`      | `2`          | simulator playback multiplier (2 = 2× real time)|
-| `CHAOS`             | `0`          | `1` = robots randomly sever/reconnect their MQTT link |
-| `STALE_MS`          | `15000`      | silence longer than this → robot flagged offline |
-| `MQTT_URL`          | `mqtt://broker:1883` | broker address                        |
+| Var            | Default              | Meaning                                          |
+|-----------------|---------------------|---------------------------------------------------|
+| `REPLAY_SPEED`  | `2`                 | simulator playback multiplier (2 = 2× real time)  |
+| `CHAOS`         | `0`                 | `1` = robots randomly sever/reconnect their MQTT link |
+| `STALE_MS`      | `15000`             | silence longer than this → robot flagged offline  |
+| `MQTT_URL`      | `mqtt://broker:1883`| broker address                                    |
 
 `CHAOS=1 docker compose up --build` is the fastest way to watch the
 Last-Will/watchdog offline detection work end to end.
 
-## Design decisions (short version; long version in ANSWERS.md)
+One thing worth knowing: the log is ~15 minutes of recorded time and loops
+forever once it runs out (at `REPLAY_SPEED=2`, about every 7.5 min). Each
+robot's own event-time `t` keeps counting up across loops instead of
+resetting to 0 — resetting it would trip the backend's own stale-event guard
+and silently freeze the fleet after lap 1. So `t` isn't literally wall-clock
+time, it's a monotonically increasing per-robot counter, which is all the
+backend actually needs from it.
 
-1. **MQTT as the robot transport.** Robots are producers, the backend is a
-   consumer, and real robots are flaky — MQTT was designed for exactly this.
-   It gives us per-robot topics, QoS 1 delivery, retained online/offline
-   status, and a **Last Will** so the broker itself reports a dead robot even
-   if its TCP link just vanishes.
-2. **One publisher process per robot.** The simulator supervisor forks 8 child
-   processes, each with its own MQTT connection, its own event schedule and
-   its own crash behaviour — the brief explicitly ruled out 8 coroutines in
-   one process.
-3. **A single in-memory `FleetState` Map as the source of truth.** Both the
-   WebSocket fanout and the REST endpoint read the same object, so the two
-   transports can never disagree (see `backend/src/fleetState.js`).
-4. **Monotonic per-robot sequence numbers + a stale-update guard** make
-   late/out-of-order QoS 1 redeliveries harmless.
-5. **MongoDB for history** because the events are append-only JSON documents
-   with an occasional extra `task_event` key — a document store fits with
-   zero schema ceremony, and it's the M of MERN.
+## Why it's built this way
+
+(full reasoning in `ANSWERS.md`, scaling/failure walkthroughs in
+`SYSTEM_DESIGN.md`)
+
+- **MQTT, not HTTP callbacks or a heavier queue.** Robots are flaky
+  producers, and MQTT gives me Last-Will (the broker itself announces a dead
+  robot even if its process just vanishes), retained online/offline status,
+  and QoS 1 redelivery — all things I'd otherwise have to hand-roll.
+- **One OS process per robot**, not 8 coroutines in one process — the brief
+  ruled that out, and it's honestly closer to how independent hardware
+  behaves anyway.
+- **One in-memory `FleetState` Map is the only source of truth.** Both REST
+  and WS read the same object, so the two transports can't drift apart.
+- **Monotonic per-robot `seq` + a stale-`t` guard** stop late or duplicate
+  QoS 1 redeliveries from rewinding a robot's position for every client at
+  once.
+- **MongoDB for history.** The events are basically schemaless JSON with an
+  occasional extra key — a document store fit with no ORM ceremony, and it's
+  the M of MERN.
 
 ## Tests
 
@@ -93,49 +92,49 @@ cd backend && npm install && npm test          # 15 tests: FleetState + REST rou
 cd robot-simulator && npm install && npm test  #  3 tests: log loader
 ```
 
-The trickiest part — `FleetState`'s ordering, dedup, and watchdog semantics —
-is covered by `backend/tests/fleetState.test.js` (stale-event rejection,
-exactly-once online transitions, sweep behaviour, REST/WS snapshot equality).
+Most of the care went into `backend/tests/fleetState.test.js` — it's the
+part where every correctness guarantee of both APIs actually lives (stale-
+event rejection, exactly-once online transitions, watchdog sweep behaviour,
+REST/WS snapshot equality).
 
-## Data provenance (honesty note)
+## About the data (honesty note)
 
-The supplied `events.jsonl` reached me as a **partial screenshot** — t=0 was
-fully legible, t=5 mostly legible (r7/r8 were cut off), and the remaining
-~15 minutes were not visible at all. `data/events.jsonl` therefore:
+`events.jsonl` reached me as a partial screenshot — t=0 fully legible, t=5
+mostly (r7/r8 cut off), and everything after that not visible at all. So
+`data/events.jsonl`:
 
-- reproduces the 14 legible screenshot lines **verbatim**,
-- infers r7/r8 @ t=5 using the log's own convention (idle robots: position
-  unchanged, battery −0.1),
-- extends the window to t=900 with a small seeded simulation
+- keeps the 14 legible screenshot lines verbatim,
+- fills in r7/r8 @ t=5 using the log's own convention for idle robots
+  (position unchanged, battery −0.1),
+- extends the window to t=900 with a small seeded generator
   (`tools/gen-events.js`) that respects the obstacle rectangles measured from
-  `layout.png`, drains battery while moving, recharges at pads, and emits a
-  few rare `task_started`/`task_completed` extras exactly as the brief
+  `layout.png`, drains battery while moving, recharges at pads, and throws in
+  the occasional `task_started`/`task_completed`, same as the brief
   describes.
 
-This matches the brief's own framing ("this log comes from a small scripted
-simulation… nothing hidden in it"), and the generator is included so the file
-is reproducible. If you have the original file, drop it in `data/` — nothing
-else changes.
+The generator is included so this is reproducible — if the original file
+ever turns up, drop it in `data/` and nothing else changes. `robots.json`
+was reconstructed the same way; robot types (picker/hauler, alternating)
+were illegible in the screenshot, so that split is my best guess.
 
-`robots.json` was likewise reconstructed from a screenshot; robot types
-(picker/hauler, alternating) were illegible and are my reasonable guess.
+## AI use
 
-## AI delegation notes
+Built with AI assistance (Genspark) under my direction. I picked the
+architecture — MQTT, one process per robot, a single source of truth,
+LWT + watchdog for failure detection — and the AI drafted boilerplate
+(Dockerfiles, the compose file, Express plumbing, test scaffolding) and the
+data-reconstruction script. Every design decision, and every bug I found
+while integrating it — a blocking Mongo connect on boot, resolving the data
+directory across Docker vs. running locally, an LWT race in the test
+harness, and a log-loop bug where the replay's `t` reset to 0 every lap and
+got silently rejected by my own stale-event guard after ~7.5 minutes — is
+mine, and I can walk through any of it line by line.
 
-Built with AI assistance (Genspark) under my direction. Concretely: I chose
-the architecture (MQTT, one-process-per-robot, single source of truth,
-LWT+watchdog), and the AI drafted the boilerplate (Dockerfiles, compose file,
-Express plumbing, test scaffolding) and the data-reconstruction generator.
-Every design decision, every bug found during integration testing (the
-blocking Mongo connect, the data-dir resolution, the LWT race in the test
-harness), and all tradeoff arguments in ANSWERS.md/SYSTEM_DESIGN.md are
-reviewed and owned by me. No code is included that I cannot explain line by
-line.
+## What I'd build next
 
-## What I'd do next
-
-TLS + per-robot credentials on the broker, a dead-letter/alert topic for
-`error`-status robots, Prometheus metrics on ingestion counters, a minimal
-operator dashboard consuming `/ws`, and horizontal scaling (shared-subscription
-consumers + Redis pub/sub for cross-instance WS fanout) once robot counts
-justify it — see SYSTEM_DESIGN.md.
+TLS + per-robot credentials on the broker, an alert path for `error`/
+`blocked` robots, Prometheus metrics on the ingestion counters, a minimal
+operator dashboard consuming `/ws`, and — once robot counts justify it —
+horizontal scaling via MQTT shared subscriptions and Redis pub/sub for
+cross-instance WS fanout. Longer version with trade-offs in
+`SYSTEM_DESIGN.md`.
