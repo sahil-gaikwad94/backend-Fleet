@@ -56,14 +56,6 @@ to re-sync at any point.
 `CHAOS=1 docker compose up --build` is the fastest way to watch the
 Last-Will/watchdog offline detection work end to end.
 
-One thing worth knowing: the log is ~15 minutes of recorded time and loops
-forever once it runs out (at `REPLAY_SPEED=2`, about every 7.5 min). Each
-robot's own event-time `t` keeps counting up across loops instead of
-resetting to 0 — resetting it would trip the backend's own stale-event guard
-and silently freeze the fleet after lap 1. So `t` isn't literally wall-clock
-time, it's a monotonically increasing per-robot counter, which is all the
-backend actually needs from it.
-
 ## Why it's built this way
 
 (full reasoning in `ANSWERS.md`, scaling/failure walkthroughs in
@@ -99,13 +91,8 @@ REST/WS snapshot equality).
 
 ## AI use
 
-AI assistance (Genspark). I picked the architecture — MQTT, one process per 
+Used AI assistance (Genspark). I picked the architecture- MQTT, one process per 
 robot, a single source of truth,
-LWT + watchdog for failure detection — and the AI drafted explanatory comments, boilerplate
-(Dockerfiles, the compose file, Express plumbing, test scaffolding) and the
-data-reconstruction script. Every design decision, and every bug I found
-while integrating it — a blocking Mongo connect on boot, resolving the data
-directory across Docker vs. running locally, an LWT race in the test
-harness is mine, and I can walk through any of it line by line.
+LWT + watchdog for failure detection and the AI drafted explanatory comments, boilerplate (Dockerfiles, the compose file, Express plumbing, test scaffolding).
 
 
