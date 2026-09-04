@@ -1,105 +1,107 @@
 # ANSWERS.md — Assignment 2 (Backend)
 
-## 1. What holds the fleet's current state, and why that shape?
 
-The fleet's current state lives in a single in-memory `Map<string, RobotRecord>`
-inside `FleetState` (`backend/src/fleetState.js`). There is exactly one instance
-per backend process, created at boot from `robots.json`, and **every consumer
-reads that same object**: the MQTT consumer writes to it
-(`mqttConsumer.js` → `applyTelemetry`), the WebSocket hub broadcasts the events
-`applyTelemetry` returns, and the REST endpoints (`routes.js`) serialize the
-same records via `snapshot()` / `getRobot()`.
+## 1. Where does the fleet's current state live, and why that shape?
 
-Why this shape: the assignment's consistency requirement — "a client using one
-should not see something inconsistent with a client using the other" — is
-easiest to guarantee by making it impossible to do otherwise. With one
-in-memory store there is no replication lag, no cache invalidation, and no
-second code path that can drift. A `Map` keyed by `robot_id` gives O(1)
-updates (the hot path, ~2 msg/s here but the shape holds at much higher rates)
-and O(n) snapshots, where n is the fleet size — trivially cheap at 8 robots
-and still fine at hundreds. Each record is flat (`robot_id`, `x`, `y`,
-`status`, `battery`, `t`, `seq`, `online`, `updated_at`, `last_seen`) so it
-serializes straight to JSON for either transport without a transform layer.
-Each robot also keeps a 20-entry `history_tail` ring so a reconnecting client
-(or a human debugging) can see the robot's last few events without hitting
-Mongo.
+It lives in one in-memory `Map<string, RobotRecord>` inside `FleetState`
+(`backend/src/fleetState.js`). There's exactly one instance per backend
+process, built at boot from `robots.json`, and every consumer reads that same
+object: the MQTT consumer writes into it through `applyTelemetry`, the
+WebSocket hub broadcasts whatever `applyTelemetry` returns, and the REST
+routes (`routes.js`) serialize the same records via `snapshot()` /
+`getRobot()`.
 
-One addition is the per-robot monotonic `seq` and the stale guard
-in `applyTelemetry`: an event whose recorded `t` is older than what we already
-hold is counted (`counters.dropped_stale`) and dropped, so a late or
-redelivered packet can never rewind a robot's position on every client at
-once. This is the property the test suite
-(`backend/tests/fleetState.test.js`) spends the most time on, because every
-correctness guarantee of both APIs reduces to it.
+Why this shape: the assignment's consistency requirement — a client on one
+interface shouldn't see something inconsistent with a client on the other —
+is easiest to guarantee by making it structurally impossible to break. One
+in-memory store means there's no replication lag, no cache to invalidate, and
+no second code path that can drift from the first. A `Map` keyed by
+`robot_id` gives O(1) updates (the hot path — ~2 msg/s here, but the shape
+holds at much higher rates) and O(n) snapshots, which is trivial at 8 robots
+and still fine at hundreds. Each record is flat — `robot_id`, `x`, `y`,
+`status`, `battery`, `t`, `seq`, `online`, `updated_at`, `last_seen` — so it
+serializes straight to JSON for either transport, no transform layer needed.
+Each robot also carries a 20-entry `history_tail` ring so a reconnecting
+client (or a human debugging) can see its recent events without a Mongo
+round-trip.
 
-## 2. One real tradeoff: the robot→backend mechanism
+The one addition on top of the plain Map is the per-robot monotonic `seq` and
+the stale guard in `applyTelemetry`: any event whose `t` is older than what's
+already held gets counted (`counters.dropped_stale`) and dropped, so a late
+or redelivered packet can never rewind a robot's position for every client at
+once. This is the property `backend/tests/fleetState.test.js` spends the most
+time on, because basically every correctness guarantee either API makes
+reduces to it.
 
-**I chose MQTT (Mosquitto) with QoS 1, rather than HTTP callbacks, raw
-sockets, or a heavier queue like Kafka/RabbitMQ.**
+## 2. One real tradeoff worth arguing: robot → backend transport
 
-Argument for it. The problem is a textbook producer/consumer split over flaky
-links, and MQTT was designed for exactly this setting: battery-powered
-publishers, unreliable networks, many small messages. Concretely it bought me
-three things I would otherwise have had to build: (a) a **Last Will and
-Testament** — each robot registers a retained "offline" message at connect
-time (`robot-simulator/src/robot-process.js`), so if a robot's TCP link dies
-silently the *broker* announces its death and my backend learns about it
-within seconds even with no robot code running at all; (b) **retained status
-topics**, so a backend that restarts mid-shift immediately sees who is online
-without waiting for the next telemetry tick; (c) **QoS 1 + persistent
-sessions** on the consumer side (`clean: false` in
-`backend/src/mqttConsumer.js`), so messages published while the backend is
-briefly down are redelivered when it comes back. HTTP webhooks would have
-given me none of this — every robot would need retry queues, and "robot died"
-would be indistinguishable from "robot is quiet". Kafka would give me stronger
-log semantics but is absurdly heavy for 8 robots and ~2 messages/second, and
-it has no concept of a per-device presence will.
+**MQTT (Mosquitto) with QoS 1, over HTTP callbacks, raw sockets, or something
+heavier like Kafka/RabbitMQ.**
 
-The cost, honestly stated. QoS 1 means **at-least-once**: duplicates and
-out-of-order redelivery are normal, and I pay for that in
-`FleetState.applyTelemetry` with the stale-`t` guard and idempotent
-re-application (equal-`t` updates just re-stamp the same values). Second, the
-WS fanout is fire-and-forget: a telemetry event can be ACKed to the robot
-(QoS 1) and applied to state while a WebSocket client is momentarily
-disconnected, so that client *misses* the delta. I reconcile the two
-semantics by making the WS layer catch-up-based rather than delivery-based:
-on connect (and on demand) the client receives a full `snapshot`, and every
-robot record carries `seq` so a client can detect gaps and re-sync. That is
+Why I picked it: this is a textbook producer/consumer problem over flaky
+links, and MQTT was built for exactly that — battery-powered publishers,
+unreliable networks, lots of small messages. It bought me three things I'd
+otherwise have had to hand-build:
+
+- **Last Will and Testament** — each robot registers a retained "offline"
+  message at connect time (`robot-simulator/src/robot-process.js`). If a
+  robot's TCP link dies silently, the *broker* announces the death, and my
+  backend learns about it within seconds even with zero robot code running.
+- **Retained status topics** — a backend that restarts mid-shift sees who's
+  online immediately, without waiting for the next telemetry tick.
+- **QoS 1 + persistent sessions** on the consumer side (`clean: false` in
+  `mqttConsumer.js`) — anything published while the backend was briefly down
+  gets redelivered once it's back.
+
+HTTP webhooks would've given me none of that — every robot would need its own
+retry queue, and "robot died" would look identical to "robot is just quiet."
+Kafka gives stronger log semantics but is way too heavy for 8 robots at
+~2 msg/sec, and it has no concept of per-device presence at all.
+
+The honest cost: QoS 1 is at-least-once, so duplicates and out-of-order
+redelivery are just normal, and I pay for that with the stale-`t` guard and
+idempotent re-application in `FleetState.applyTelemetry` (an equal-`t` update
+just re-stamps the same values). Second, WS fanout is fire-and-forget — a
+telemetry event can be ACKed to the robot and applied to state while a WS
+client happens to be disconnected, and that client just misses the delta. I
+reconcile this by making the WS layer catch-up-based instead of
+delivery-based: on connect (or on demand) a client gets a full snapshot, and
+every record carries `seq` so a client can detect a gap and re-sync. That's
 deliberately weaker than end-to-end exactly-once — the state store is the
-authority, the stream is a notification mechanism — and it means a dashboard
-that never reconnects cleanly could show stale positions indefinitely.
-Third, MQTT adds a broker to operate: one more container, one more failure
-mode (though the simulator's `reconnectPeriod` and the consumer's persistent
-session mean a broker restart self-heals). For this fleet size I judged the
-broker's operational cost well below the cost of hand-rolling presence,
-retry, and redelivery over HTTP.
+source of truth, the stream is just a notification — which does mean a
+dashboard that never reconnects cleanly could sit on stale data indefinitely.
+Third, MQTT means running a broker — one more container, one more failure
+mode, though the simulator's `reconnectPeriod` plus the consumer's persistent
+session mean a broker restart mostly self-heals. For this fleet size, the
+broker's operational cost is well below what it would've cost to hand-roll
+presence, retries, and redelivery over HTTP myself.
 
-## 3. What I left out, and what I'd build next
+## 3. What I left out, and what's next
 
-Left out, deliberately, inside the timebox:
+Left out on purpose, inside the timebox:
 
-- **Authentication and TLS.** The Mosquitto listener allows anonymous
-  connections (`broker/mosquitto.conf`) and the REST/WS APIs are open with
-  permissive CORS. Fine for a local evaluation stack; unacceptable for a real
-  site. Next step: per-robot username/password or client certs on the broker,
-  and a token on the API.
-- **Rich history queries.** The stretch goal is implemented
-  (`GET /robots/history/:id?from=&to=`, backed by MongoDB in
-  `backend/src/history.js`), but only filtered by event-time `t` with a limit
-  cap — no aggregation (e.g. "battery drain per hour"), no pagination cursor,
-  no fleet-wide history endpoint.
-- **Command path.** The system is strictly telemetry-in. A real operator
-  dashboard eventually needs the reverse direction ("robot r3, return to
-  charger"), which would land as a `fleet/robots/{id}/cmd` topic the
-  simulator subscribes to.
-- **Structured alerting.** `error`/`blocked` statuses are ingested and
-  fanned out, but nothing pages anyone; a natural next step is a small
-  rules engine consuming the same `onEvent` hook the WS hub uses.
-- **Horizontal scaling.** One backend process holds all state. The sharding
-  story (shared MQTT subscriptions, Redis fanout) is written up in
-  SYSTEM_DESIGN.md question 2 rather than built, because at 8 robots it would
-  be pure ceremony.
+- **Auth and TLS.** The Mosquitto listener allows anonymous connections
+  (`broker/mosquitto.conf`), and the REST/WS APIs are open with permissive
+  CORS. Fine for a local eval stack, not okay for a real deployment. Next
+  step: per-robot username/password or client certs on the broker, plus a
+  token on the API.
+- **Richer history queries.** The stretch goal is done —
+  `GET /robots/history/:id?from=&to=`, backed by Mongo in `history.js` — but
+  it's only filtered by event-time `t` with a limit cap. No aggregation
+  (battery drain per hour, say), no pagination cursor, no fleet-wide history
+  endpoint.
+- **Command path.** The system is telemetry-in only, one direction. A real
+  dashboard eventually needs "robot r3, return to charger," which would land
+  as a `fleet/robots/{id}/cmd` topic the simulator subscribes to.
+- **Structured alerting.** `error`/`blocked` statuses get ingested and
+  fanned out, but nothing actually pages anyone. The natural next step is a
+  small rules engine hanging off the same `onEvent` hook the WS hub uses.
+- **Horizontal scaling.** One backend process holds all the state. I wrote up
+  the sharding story — shared MQTT subscriptions, Redis fanout — in
+  SYSTEM_DESIGN.md Q2 instead of building it, because at 8 robots it would be
+  pure ceremony.
 
-Given more time I'd build those in roughly that order: security first, then
-alerting (highest operator value per hour), then the command path, then
+If I had more time, roughly in this order: security first, then alerting
+(best operator value per hour of work), then the command path, then richer
+history.
 richer history.
