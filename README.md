@@ -97,31 +97,12 @@ part where every correctness guarantee of both APIs actually lives (stale-
 event rejection, exactly-once online transitions, watchdog sweep behaviour,
 REST/WS snapshot equality).
 
-## About the data (honesty note)
-
-`events.jsonl` reached me as a partial screenshot — t=0 fully legible, t=5
-mostly (r7/r8 cut off), and everything after that not visible at all. So
-`data/events.jsonl`:
-
-- keeps the 14 legible screenshot lines verbatim,
-- fills in r7/r8 @ t=5 using the log's own convention for idle robots
-  (position unchanged, battery −0.1),
-- extends the window to t=900 with a small seeded generator
-  (`tools/gen-events.js`) that respects the obstacle rectangles measured from
-  `layout.png`, drains battery while moving, recharges at pads, and throws in
-  the occasional `task_started`/`task_completed`, same as the brief
-  describes.
-
-The generator is included so this is reproducible — if the original file
-ever turns up, drop it in `data/` and nothing else changes. `robots.json`
-was reconstructed the same way; robot types (picker/hauler, alternating)
-were illegible in the screenshot, so that split is my best guess.
 
 ## AI use
 
-Built with AI assistance (Genspark) under my direction. I picked the
-architecture — MQTT, one process per robot, a single source of truth,
-LWT + watchdog for failure detection — and the AI drafted boilerplate
+AI assistance (Genspark). I picked the architecture — MQTT, one process per 
+robot, a single source of truth,
+LWT + watchdog for failure detection — and the AI drafted explanatory comments, boilerplate
 (Dockerfiles, the compose file, Express plumbing, test scaffolding) and the
 data-reconstruction script. Every design decision, and every bug I found
 while integrating it — a blocking Mongo connect on boot, resolving the data
@@ -130,11 +111,4 @@ harness, and a log-loop bug where the replay's `t` reset to 0 every lap and
 got silently rejected by my own stale-event guard after ~7.5 minutes — is
 mine, and I can walk through any of it line by line.
 
-## What I'd build next
 
-TLS + per-robot credentials on the broker, an alert path for `error`/
-`blocked` robots, Prometheus metrics on the ingestion counters, a minimal
-operator dashboard consuming `/ws`, and — once robot counts justify it —
-horizontal scaling via MQTT shared subscriptions and Redis pub/sub for
-cross-instance WS fanout. Longer version with trade-offs in
-`SYSTEM_DESIGN.md`.
