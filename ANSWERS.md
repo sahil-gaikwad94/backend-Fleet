@@ -24,7 +24,7 @@ Each robot also keeps a 20-entry `history_tail` ring so a reconnecting client
 (or a human debugging) can see the robot's last few events without hitting
 Mongo.
 
-One deliberate addition is the per-robot monotonic `seq` and the stale guard
+One addition is the per-robot monotonic `seq` and the stale guard
 in `applyTelemetry`: an event whose recorded `t` is older than what we already
 hold is counted (`counters.dropped_stale`) and dropped, so a late or
 redelivered packet can never rewind a robot's position on every client at
