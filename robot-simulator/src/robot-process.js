@@ -112,7 +112,14 @@ async function main() {
     chaosLoop().catch(() => {});
   }
 
-  // replay loop (forever)
+  // replay loop (forever). `t` must keep counting up across laps: the
+  // backend's stale-event guard (FleetState.applyTelemetry) rejects any `t`
+  // older than what it already holds, so restarting the log at t=0 every lap
+  // would get every robot's first lap-2 event dropped as stale -- and every
+  // event after that, forever, since the guard never lets `t` go backwards.
+  // lapOffset keeps `t` monotonic across laps so the guard doesn't fire.
+  const LAP_PERIOD = events[events.length - 1].t + 1; // > any t within one lap
+  let lapOffset = 0;
   for (;;) {
     for (let i = 0; i < events.length; i++) {
       const evt = events[i];
@@ -124,7 +131,7 @@ async function main() {
       }
       const payload = {
         robot_id: evt.robot_id,
-        t: evt.t,
+        t: evt.t + lapOffset,
         x: evt.x,
         y: evt.y,
         status: evt.status,
@@ -138,7 +145,8 @@ async function main() {
         console.warn(`[${ROBOT_ID}] publish failed (will retry on next event): ${err.message}`);
       }
     }
-    console.log(`[${ROBOT_ID}] log finished, looping from t=0`);
+    lapOffset += LAP_PERIOD;
+    console.log(`[${ROBOT_ID}] log finished, looping (next lap starts at t=${lapOffset})`);
     await sleep(2000);
   }
 }
