@@ -3,7 +3,7 @@
 Backend for a robot-fleet dashboard. Eight mocked robots replay their recorded
 telemetry (`events.jsonl`) over MQTT. A Node backend consumes that stream,
 keeps the fleet's current state in one in-memory store, and serves it two
-ways — a WebSocket push stream and a REST polling API — both reading the same
+ways, a WebSocket push stream and a REST polling API both reading the same
 store so they can never disagree. Fleet history is persisted to MongoDB
 (stretch goal). Everything comes up with one `docker compose up`.
 
@@ -24,7 +24,7 @@ docker compose up --build
 | `backend`   | Express REST + WebSocket API, MQTT consumer        | 8080  |
 | `simulator` | Forks one OS process per robot                     |   —   |
 
-Nothing needs to be run by hand in a second terminal — the simulator starts
+Nothing needs to be run by hand in a second terminal. the simulator starts
 all 8 robots on its own. Images are pinned to `linux/amd64` so it boots on
 the eval machine even if built on Apple Silicon.
 
